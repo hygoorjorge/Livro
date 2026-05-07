@@ -4,6 +4,7 @@ import { BrowserRouter, Route, Routes, NavLink, Navigate } from "react-router-do
 import { LawsLibrary } from "./pages/LawsLibrary";
 import { Upload } from "./pages/Upload";
 import { Review } from "./pages/Review";
+import { HistoricalQueue } from "./pages/HistoricalQueue";
 import { FigureReview } from "./pages/FigureReview";
 import { Verify } from "./pages/Verify";
 import "./styles.css";
@@ -16,6 +17,7 @@ function Shell() {
         <NavLink to="/laws">Leis & Mappings</NavLink>
         <NavLink to="/upload">Upload do Livro</NavLink>
         <NavLink to="/review">Revisão</NavLink>
+        <NavLink to="/historical">Fila histórica</NavLink>
         <NavLink to="/figures">Figuras</NavLink>
         <NavLink to="/verify">Verificar & Exportar</NavLink>
       </nav>
@@ -25,6 +27,7 @@ function Shell() {
           <Route path="/laws" element={<LawsLibrary />} />
           <Route path="/upload" element={<Upload />} />
           <Route path="/review" element={<Review />} />
+          <Route path="/historical" element={<HistoricalQueue />} />
           <Route path="/figures" element={<FigureReview />} />
           <Route path="/verify" element={<Verify />} />
         </Routes>

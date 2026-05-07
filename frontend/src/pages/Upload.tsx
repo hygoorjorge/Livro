@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { useSession } from "../state/session";
+import { ProgressBar } from "../components/ProgressBar";
 
 export function Upload() {
   const { sessionId, setSessionId } = useSession();
@@ -81,6 +82,7 @@ export function Upload() {
           Iniciar detecção de menções
         </button>
       </div>
+      <ProgressBar sessionId={sessionId} />
     </div>
   );
 }

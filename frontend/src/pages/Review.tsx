@@ -1,18 +1,27 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useSession } from "../state/session";
+import { Highlight, PdfPane, PdfPaneHandle } from "../components/PdfPane";
+import { ProgressBar } from "../components/ProgressBar";
 
 export function Review() {
   const { sessionId } = useSession();
   const [mentions, setMentions] = useState<any[]>([]);
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [active, setActive] = useState<any | null>(null);
   const [proposals, setProposals] = useState<any[]>([]);
   const [manualText, setManualText] = useState("");
   const [busy, setBusy] = useState(false);
+  const pdfRef = useRef<PdfPaneHandle>(null);
 
   async function refreshMentions() {
     if (!sessionId) return;
-    setMentions(await api.listMentions(sessionId));
+    const list = await api.listMentions(sessionId);
+    const nonHistorical = list.filter(
+      (m) => !m.is_historical || m.status === "confirmed"
+    );
+    setMentions(nonHistorical);
+    setHighlights(await api.listHighlights(sessionId));
   }
 
   useEffect(() => {
@@ -23,6 +32,7 @@ export function Review() {
     setActive(m);
     setProposals(await api.proposalsForMention(m.id));
     setManualText("");
+    pdfRef.current?.scrollToMention(m.id);
   }
 
   async function genAuto() {
@@ -39,6 +49,7 @@ export function Review() {
   async function accept(p: any, edited?: string) {
     await api.acceptProposal(p.id, edited);
     setProposals(await api.proposalsForMention(active.id));
+    await refreshMentions();
   }
 
   async function reject(p: any) {
@@ -51,64 +62,86 @@ export function Review() {
     await api.generateManual(active.id, manualText.trim());
     setProposals(await api.proposalsForMention(active.id));
     setManualText("");
+    await refreshMentions();
   }
 
   if (!sessionId) return <p>Selecione uma sessão na tela de Upload.</p>;
 
   return (
     <div>
-      <h2>Revisão lado-a-lado</h2>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2 style={{ margin: 0 }}>Revisão lado-a-lado</h2>
+        <div className="row">
+          <button onClick={refreshMentions}>↻ Atualizar</button>
+          <a href="/historical">Fila histórica →</a>
+        </div>
+      </div>
+      <ProgressBar sessionId={sessionId} />
       <div className="split">
-        <div className="pane">
-          <h3>Menções detectadas</h3>
-          <button onClick={refreshMentions}>Atualizar</button>
-          <table>
-            <thead>
-              <tr>
-                <th>Trecho</th>
-                <th>Ref</th>
-                <th>Hist?</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mentions.map((m) => (
-                <tr
-                  key={m.id}
-                  onClick={() => selectMention(m)}
-                  style={{
-                    cursor: "pointer",
-                    background: active?.id === m.id ? "#fef3c7" : undefined,
-                  }}
-                >
-                  <td>
-                    <span className="mark">{m.raw_text}</span>
-                  </td>
-                  <td>{m.detected_ref}</td>
-                  <td>{m.is_historical ? "sim" : "—"}</td>
-                  <td>{m.status}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="pane" style={{ padding: 0 }}>
+          <PdfPane
+            ref={pdfRef}
+            url={`/api/pdf/${sessionId}/source`}
+            highlights={highlights}
+            activeMentionId={active?.id ?? null}
+            onHighlightClick={(id) => {
+              const m = mentions.find((mm) => mm.id === id);
+              if (m) selectMention(m);
+            }}
+          />
         </div>
 
         <div className="pane">
-          <h3>Proposta de atualização</h3>
-          {!active && <p className="muted">Selecione uma menção ao lado.</p>}
+          <h3 style={{ marginTop: 0 }}>
+            Proposta de atualização
+            <span className="muted" style={{ marginLeft: 8 }}>
+              ({mentions.length} menções não-históricas pendentes)
+            </span>
+          </h3>
+
+          {!active && (
+            <>
+              <p className="muted">
+                Clique em uma menção destacada no PDF (ou na lista abaixo) para
+                editar.
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Trecho</th>
+                    <th>Ref</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mentions.map((m) => (
+                    <tr
+                      key={m.id}
+                      onClick={() => selectMention(m)}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <td>
+                        <span className="mark">{m.raw_text}</span>
+                      </td>
+                      <td>{m.detected_ref}</td>
+                      <td>{m.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+
           {active && (
             <>
               <p>
                 <strong>Menção:</strong>{" "}
                 <span className="mark">{active.raw_text}</span>{" "}
-                <span className="muted">→ {active.detected_ref}</span>
+                <span className="muted">→ {active.detected_ref}</span>{" "}
+                <button onClick={() => setActive(null)} style={{ marginLeft: 8 }}>
+                  voltar
+                </button>
               </p>
-              {active.is_historical && (
-                <p style={{ background: "#fee2e2", padding: 8, borderRadius: 6 }}>
-                  ⚠ Menção em contexto histórico. Decida manualmente se mantém
-                  ou atualiza.
-                </p>
-              )}
               <div className="row">
                 <button onClick={genAuto} disabled={busy} className="primary">
                   {busy ? "Gerando..." : "Gerar proposta automática (Claude)"}
@@ -128,10 +161,21 @@ export function Review() {
                   <div className="muted">
                     {p.mode} · {p.status} · conf {p.confidence?.toFixed?.(2)} ·
                     cache {p.prompt_cache_hit ? "✔" : "—"}
+                    {p.needs_human_check && (
+                      <span className="badge danger" style={{ marginLeft: 8 }}>
+                        revisão humana
+                      </span>
+                    )}
                   </div>
                   <div>
                     <strong>Original:</strong>
-                    <pre style={{ whiteSpace: "pre-wrap", background: "#fef2f2", padding: 8 }}>
+                    <pre
+                      style={{
+                        whiteSpace: "pre-wrap",
+                        background: "#fef2f2",
+                        padding: 8,
+                      }}
+                    >
                       {p.original_text}
                     </pre>
                   </div>
@@ -172,7 +216,9 @@ export function Review() {
                   onChange={(e) => setManualText(e.target.value)}
                   placeholder="Digite o texto final manualmente"
                 />
-                <button onClick={manual}>Salvar como proposta manual aceita</button>
+                <button onClick={manual}>
+                  Salvar como proposta manual aceita
+                </button>
               </div>
             </>
           )}

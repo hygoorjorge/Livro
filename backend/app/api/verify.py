@@ -20,7 +20,7 @@ from app.db.models import (
 )
 from app.db.session import get_session_dep
 from app.services.docx_exporter import export_docx
-from app.services.pdf_editor import EditOp, apply_edits, replace_figure
+from app.services.pdf_editor import EditOp, PageParagraph, apply_edits, replace_figure
 from app.services.verifier import verify_session
 
 router = APIRouter(prefix="/verify", tags=["verify"])
@@ -32,12 +32,61 @@ class VerifyOut(BaseModel):
     unauthorized_diffs: list[dict]
 
 
-async def _build_edit_ops(db: AsyncSession, session_id: int) -> list[EditOp]:
+async def _build_edit_ops(
+    db: AsyncSession, session_id: int
+) -> tuple[list[EditOp], dict[int, list[PageParagraph]]]:
     pages = (
         await db.execute(
             select(Page).where(Page.session_id == session_id).order_by(Page.page_num)
         )
     ).scalars().all()
+    page_by_id = {p.id: p for p in pages}
+    page_ids = list(page_by_id.keys())
+
+    spans_by_page: dict[int, list[TextSpan]] = {}
+    if page_ids:
+        rows = (
+            await db.execute(
+                select(TextSpan)
+                .where(TextSpan.page_id.in_(page_ids))
+                .order_by(TextSpan.page_id, TextSpan.span_index)
+            )
+        ).scalars().all()
+        for s in rows:
+            spans_by_page.setdefault(s.page_id, []).append(s)
+
+    paragraphs = (
+        await db.execute(
+            select(Paragraph)
+            .where(Paragraph.page_id.in_(page_ids))
+            .order_by(Paragraph.page_id, Paragraph.paragraph_index)
+        )
+    ).scalars().all()
+
+    layouts_by_page: dict[int, list[PageParagraph]] = {}
+    para_by_id: dict[int, Paragraph] = {}
+    for para in paragraphs:
+        para_by_id[para.id] = para
+        page = page_by_id.get(para.page_id)
+        if page is None:
+            continue
+        spans = spans_by_page.get(page.id, [])
+        para_spans = [s for s in spans if s.span_index in (para.span_ids_json or [])]
+        if not para_spans:
+            continue
+        bboxes = [(s.bbox_x0, s.bbox_y0, s.bbox_x1, s.bbox_y1) for s in para_spans]
+        dominant = max(para_spans, key=lambda s: len(s.text))
+        layouts_by_page.setdefault(page.page_num, []).append(
+            PageParagraph(
+                paragraph_index=para.paragraph_index,
+                text=para.full_text,
+                span_bboxes=bboxes,
+                font_name=dominant.font_name,
+                font_size=dominant.font_size,
+                color=dominant.color,
+            )
+        )
+
     proposals = (
         await db.execute(
             select(Proposal).where(
@@ -47,30 +96,27 @@ async def _build_edit_ops(db: AsyncSession, session_id: int) -> list[EditOp]:
             )
         )
     ).scalars().all()
+
     ops: list[EditOp] = []
     for prop in proposals:
         mention = await db.get(Mention, prop.mention_id)
         if mention is None:
             continue
-        para = await db.get(Paragraph, mention.paragraph_id)
+        para = para_by_id.get(mention.paragraph_id)
         if para is None:
             continue
-        page = next((p for p in pages if p.id == para.page_id), None)
+        page = page_by_id.get(para.page_id)
         if page is None:
             continue
-        spans = (
-            await db.execute(
-                select(TextSpan)
-                .where(TextSpan.page_id == page.id)
-                .order_by(TextSpan.span_index)
-            )
-        ).scalars().all()
+        spans = spans_by_page.get(page.id, [])
         para_spans = [s for s in spans if s.span_index in (para.span_ids_json or [])]
         if not para_spans:
             continue
         bboxes = [(s.bbox_x0, s.bbox_y0, s.bbox_x1, s.bbox_y1) for s in para_spans]
         dominant = max(para_spans, key=lambda s: len(s.text))
-        new_full_text = para.full_text.replace(prop.original_text, prop.proposed_text, 1)
+        new_full_text = para.full_text.replace(
+            prop.original_text, prop.proposed_text, 1
+        )
         ops.append(
             EditOp(
                 page_num=page.page_num,
@@ -83,7 +129,7 @@ async def _build_edit_ops(db: AsyncSession, session_id: int) -> list[EditOp]:
                 color=dominant.color,
             )
         )
-    return ops
+    return ops, layouts_by_page
 
 
 @router.post("/{session_id}/export")
@@ -102,9 +148,9 @@ async def export(session_id: int, db: AsyncSession = Depends(get_session_dep)):
             400, f"There are {len(pending)} pending mentions; resolve before export"
         )
 
-    ops = await _build_edit_ops(db, session_id)
+    ops, layouts = await _build_edit_ops(db, session_id)
     output_pdf = settings.exports_dir / f"session_{session_id}.pdf"
-    report = apply_edits(session.pdf_path, output_pdf, ops)
+    report = apply_edits(session.pdf_path, output_pdf, ops, layouts)
 
     figures = (
         await db.execute(

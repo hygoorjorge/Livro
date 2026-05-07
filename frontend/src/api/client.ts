@@ -36,6 +36,14 @@ export const api = {
     request<{ queued: boolean }>(`/mentions/${sid}/detect`, { method: "POST" }),
   listMentions: (sid: number, status?: string) =>
     request<any[]>(`/mentions/${sid}${status ? `?status=${status}` : ""}`),
+  listHighlights: (sid: number) =>
+    request<any[]>(`/mentions/${sid}/highlights`),
+  setMentionStatus: (mentionId: number, status: string) =>
+    request<any>(`/mentions/${mentionId}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    }),
 
   generateAuto: (mentionId: number) =>
     request<any>(`/proposals/auto/${mentionId}`, { method: "POST" }),

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import figures, laws, mentions, pdf, proposals, sessions, verify
+from app.api import figures, laws, mentions, pdf, proposals, sessions, verify, ws
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.db.session import init_db
@@ -33,6 +33,7 @@ app.include_router(mentions.router, prefix="/api")
 app.include_router(proposals.router, prefix="/api")
 app.include_router(figures.router, prefix="/api")
 app.include_router(verify.router, prefix="/api")
+app.include_router(ws.router)
 
 
 @app.get("/api/health")

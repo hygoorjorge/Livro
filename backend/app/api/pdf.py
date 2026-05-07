@@ -8,18 +8,21 @@ from app.core.config import settings
 from app.db.models import Page, Paragraph, Session, SessionStatus, TextSpan, Figure
 from app.db.session import SessionLocal, get_session_dep
 from app.services.pdf_parser import file_sha256, parse_pdf
+from app.workers.progress import publish_progress
 
 router = APIRouter(prefix="/pdf", tags=["pdf"])
 
 
 async def _ingest_pdf(session_id: int, pdf_path: str) -> None:
+    await publish_progress(session_id, "parse_start", {})
     parsed_pages = parse_pdf(pdf_path)
+    total_pages = len(parsed_pages)
     async with SessionLocal() as db:
         session = await db.get(Session, session_id)
         if session is None:
             return
         session.status = SessionStatus.parsing.value
-        for parsed in parsed_pages:
+        for idx, parsed in enumerate(parsed_pages, start=1):
             page = Page(
                 session_id=session_id,
                 page_num=parsed.page_num,
@@ -69,8 +72,14 @@ async def _ingest_pdf(session_id: int, pdf_path: str) -> None:
                         caption_text=fig.caption_text,
                     )
                 )
+            await publish_progress(
+                session_id,
+                "parse_progress",
+                {"page": idx, "total": total_pages},
+            )
         session.status = SessionStatus.detecting.value
         await db.commit()
+    await publish_progress(session_id, "parse_done", {"total": total_pages})
 
 
 @router.post("/upload")
