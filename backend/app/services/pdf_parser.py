@@ -96,7 +96,7 @@ def _classify_paragraph(
     if re.search(r"\.\s*\.\s*\.\s*\.+\s*\d+\s*$", text):
         return ParagraphKind.toc
 
-    if left_x > (page.width or 1.0) * 0.18 and len(text) > 80:
+    if left_x > (page.width or 1.0) * 0.35 and len(text) > 80:
         return ParagraphKind.block_quote
 
     if re.match(r"^(figura|tabela|gr[aá]fico|quadro)\s+\d+", text, re.IGNORECASE):

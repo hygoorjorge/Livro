@@ -57,7 +57,7 @@ async def _ingest_pdf(session_id: int, pdf_path: str) -> None:
                         span_ids_json=para.span_indices,
                         full_text=para.full_text,
                         kind=para.kind.value,
-                        protected=para.kind.value == "block_quote",
+                        protected=para.kind.value in ("header", "footer", "toc"),
                     )
                 )
             for fig in parsed.figures:
