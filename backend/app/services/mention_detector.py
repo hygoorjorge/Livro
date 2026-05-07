@@ -13,20 +13,20 @@ from dataclasses import dataclass
 PROJECT_PATTERNS = [
     re.compile(
         r"\b(?:P\.?\s*L\.?\s*P\.?|Projeto\s+de\s+Lei\s+Complementar)"
-        r"\s*(?:n[º°ºo]?\.?\s*)?(\d{1,4})(?:\s*/\s*(\d{2,4}))?",
+        r"\s*(?:n[º°ºo]?\.?\s*)?(\d{1,5})(?:\s*/\s*(\d{2,4}))?",
         re.IGNORECASE,
     ),
     re.compile(
         r"\b(?:P\.?\s*L\.?|Projeto\s+de\s+Lei)"
-        r"\s*(?:n[º°ºo]?\.?\s*)?(\d{1,4})(?:\s*/\s*(\d{2,4}))?",
+        r"\s*(?:n[º°ºo]?\.?\s*)?(\d{1,5})(?:\s*/\s*(\d{2,4}))?",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\bPEC\s*(?:n[º°ºo]?\.?\s*)?(\d{1,4})(?:\s*/\s*(\d{2,4}))?",
+        r"\bPEC\s*(?:n[º°ºo]?\.?\s*)?(\d{1,5})(?:\s*/\s*(\d{2,4}))?",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\bMPV?\s*(?:n[º°ºo]?\.?\s*)?(\d{1,4})(?:\s*/\s*(\d{2,4}))?",
+        r"\bMPV?\s*(?:n[º°ºo]?\.?\s*)?(\d{1,5})(?:\s*/\s*(\d{2,4}))?",
         re.IGNORECASE,
     ),
 ]
