@@ -2,7 +2,7 @@ import io
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,7 @@ from app.db.models import (
     VerificationRun,
 )
 from app.db.session import get_session_dep
+from app.services.audit_pdf_exporter import export_audit_pdf
 from app.services.docx_exporter import export_docx
 from app.services.pdf_editor import EditOp, PageParagraph, apply_edits, replace_figure
 from app.services.pdf_parser import file_sha256
@@ -293,6 +294,18 @@ async def _collect_audit(
             for r in runs
         ],
     }
+
+
+@router.get("/{session_id}/audit.pdf")
+async def audit_pdf(session_id: int, db: AsyncSession = Depends(get_session_dep)):
+    payload = await _collect_audit(db, session_id)
+    output_path = settings.exports_dir / f"audit_session_{session_id}.pdf"
+    export_audit_pdf(payload, output_path)
+    return FileResponse(
+        str(output_path),
+        media_type="application/pdf",
+        filename=f"auditoria_sessao_{session_id}.pdf",
+    )
 
 
 @router.get("/{session_id}/audit.json")

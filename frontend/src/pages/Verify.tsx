@@ -59,6 +59,9 @@ export function Verify() {
         <a href={`/api/pdf/${sessionId}/export.docx`} target="_blank">
           Baixar DOCX
         </a>
+        <a href={`/api/verify/${sessionId}/audit.pdf`} target="_blank">
+          Baixar auditoria (PDF)
+        </a>
         <a href={`/api/verify/${sessionId}/audit.md`} target="_blank">
           Baixar auditoria (Markdown)
         </a>

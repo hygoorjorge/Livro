@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import fitz
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -261,10 +262,12 @@ async def list_highlights(
 ):
     """Return mention positions for the PDF.js overlay.
 
-    For each mention, picks the bbox of the span that contains the matched
-    text (anchored on the normalized number, e.g. "108") so the highlight is
-    tight. Falls back to the paragraph-union bbox if no single span matches.
+    Uses PyMuPDF page.search_for(raw_text) for word-level tight bboxes.
+    Falls back to the span bbox if search_for finds no match, and to the
+    paragraph-union bbox as a last resort.
     """
+    session_row = await db.get(Session, session_id)
+
     pages = (
         await db.execute(
             select(Page).where(Page.session_id == session_id).order_by(Page.page_num)
@@ -302,52 +305,112 @@ async def list_highlights(
         )
     ).scalars().all()
 
-    out: list[HighlightOut] = []
-    for m in mentions:
-        para = para_by_id.get(m.paragraph_id)
-        if para is None:
-            continue
-        page = page_by_id.get(para.page_id)
-        if page is None:
-            continue
-        spans = spans_by_page.get(page.id, [])
-        para_span_set = set(para.span_ids_json or [])
-        para_spans = [s for s in spans if s.span_index in para_span_set]
-        if not para_spans:
-            continue
+    # Open the original PDF once so we can use page.search_for() per mention.
+    fitz_doc: fitz.Document | None = None
+    fitz_pages: dict[int, fitz.Page] = {}  # keyed by 0-based page index
+    if session_row and session_row.pdf_path:
+        try:
+            fitz_doc = fitz.open(session_row.pdf_path)
+        except Exception:
+            fitz_doc = None
 
-        anchor = m.detected_ref.split()[-1].split("/")[0]
-        bbox: tuple[float, float, float, float]
-        candidate = next(
-            (s for s in para_spans if anchor in s.text or m.raw_text in s.text),
-            None,
+    def _fitz_page(page_num: int) -> fitz.Page | None:
+        """Return (and cache) a fitz page by 1-based page number."""
+        if fitz_doc is None:
+            return None
+        idx = page_num - 1
+        if idx < 0 or idx >= fitz_doc.page_count:
+            return None
+        if idx not in fitz_pages:
+            fitz_pages[idx] = fitz_doc[idx]
+        return fitz_pages[idx]
+
+    def _tight_bbox(
+        raw_text: str,
+        page_num: int,
+        para_spans: list[TextSpan],
+    ) -> tuple[float, float, float, float] | None:
+        """Return a word-level bbox from search_for, or None if not found."""
+        fp = _fitz_page(page_num)
+        if fp is None:
+            return None
+        hits = fp.search_for(raw_text, quads=False)
+        if not hits:
+            return None
+        # Para center used to pick the closest hit when there are multiple matches
+        # (e.g. the same bill number appears twice on the page).
+        para_cx = (
+            min(s.bbox_x0 for s in para_spans) + max(s.bbox_x1 for s in para_spans)
+        ) / 2
+        para_cy = (
+            min(s.bbox_y0 for s in para_spans) + max(s.bbox_y1 for s in para_spans)
+        ) / 2
+        best: fitz.Rect = min(
+            hits,
+            key=lambda r: abs((r.x0 + r.x1) / 2 - para_cx)
+            + abs((r.y0 + r.y1) / 2 - para_cy),
         )
-        if candidate is not None:
-            bbox = (
-                candidate.bbox_x0,
-                candidate.bbox_y0,
-                candidate.bbox_x1,
-                candidate.bbox_y1,
+        return (best.x0, best.y0, best.x1, best.y1)
+
+    out: list[HighlightOut] = []
+    try:
+        for m in mentions:
+            para = para_by_id.get(m.paragraph_id)
+            if para is None:
+                continue
+            page = page_by_id.get(para.page_id)
+            if page is None:
+                continue
+            spans = spans_by_page.get(page.id, [])
+            para_span_set = set(para.span_ids_json or [])
+            para_spans = [s for s in spans if s.span_index in para_span_set]
+            if not para_spans:
+                continue
+
+            # 1st choice: tight bbox via PDF text search
+            bbox: tuple[float, float, float, float] | None = _tight_bbox(
+                m.raw_text, page.page_num, para_spans
             )
-        else:
-            bbox = (
-                min(s.bbox_x0 for s in para_spans),
-                min(s.bbox_y0 for s in para_spans),
-                max(s.bbox_x1 for s in para_spans),
-                max(s.bbox_y1 for s in para_spans),
+
+            if bbox is None:
+                # 2nd choice: span that contains anchor text
+                anchor = m.detected_ref.split()[-1].split("/")[0]
+                candidate = next(
+                    (s for s in para_spans if anchor in s.text or m.raw_text in s.text),
+                    None,
+                )
+                if candidate is not None:
+                    bbox = (
+                        candidate.bbox_x0,
+                        candidate.bbox_y0,
+                        candidate.bbox_x1,
+                        candidate.bbox_y1,
+                    )
+                else:
+                    # Last resort: union of all paragraph spans
+                    bbox = (
+                        min(s.bbox_x0 for s in para_spans),
+                        min(s.bbox_y0 for s in para_spans),
+                        max(s.bbox_x1 for s in para_spans),
+                        max(s.bbox_y1 for s in para_spans),
+                    )
+
+            out.append(
+                HighlightOut(
+                    mention_id=m.id,
+                    page_num=page.page_num,
+                    bbox=bbox,
+                    raw_text=m.raw_text,
+                    detected_ref=m.detected_ref,
+                    is_historical=m.is_historical,
+                    status=m.status,
+                    paragraph_id=m.paragraph_id,
+                )
             )
-        out.append(
-            HighlightOut(
-                mention_id=m.id,
-                page_num=page.page_num,
-                bbox=bbox,
-                raw_text=m.raw_text,
-                detected_ref=m.detected_ref,
-                is_historical=m.is_historical,
-                status=m.status,
-                paragraph_id=m.paragraph_id,
-            )
-        )
+    finally:
+        if fitz_doc is not None:
+            fitz_doc.close()
+
     return out
 
 
