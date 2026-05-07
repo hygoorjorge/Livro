@@ -7,13 +7,10 @@ from __future__ import annotations
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.logging import get_logger
 from app.db.models import (
     ChangeLog,
-    Law,
-    LawMapping,
     Mention,
     MentionStatus,
     Page,
@@ -21,30 +18,10 @@ from app.db.models import (
     Proposal,
     ProposalStatus,
 )
-from app.services.claude_client import ClaudeClient, build_law_corpus_block
+from app.services.claude_client import ClaudeClient
+from app.services.corpus import build_corpus
 
 logger = get_logger(__name__)
-
-
-async def _build_corpus(db: AsyncSession) -> str:
-    laws = (await db.execute(select(Law))).scalars().all()
-    mappings = (
-        await db.execute(select(LawMapping).options(selectinload(LawMapping.__mapper__.relationships)))
-    ).scalars().all()
-    laws_payload = [
-        {"identifier": law.identifier, "source_text": law.source_text} for law in laws
-    ]
-    mappings_payload: list[dict[str, str]] = []
-    law_by_id = {law.id: law.identifier for law in laws}
-    for m in mappings:
-        mappings_payload.append(
-            {
-                "obsolete_ref": m.obsolete_ref,
-                "vigent_ref": law_by_id.get(m.vigent_law_id, str(m.vigent_law_id)),
-                "notes": m.notes or "",
-            }
-        )
-    return build_law_corpus_block(laws_payload, mappings_payload)
 
 
 async def _neighbor_paragraphs(db: AsyncSession, paragraph: Paragraph) -> list[str]:
@@ -77,7 +54,7 @@ async def generate_proposal(
     if paragraph.protected:
         raise ValueError("Cannot propose changes on protected paragraph")
 
-    corpus = await _build_corpus(db)
+    corpus = await build_corpus(db)
     neighbors = await _neighbor_paragraphs(db, paragraph)
 
     result = await claude.propose_update(

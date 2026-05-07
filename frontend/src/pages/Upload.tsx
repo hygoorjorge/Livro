@@ -21,10 +21,13 @@ export function Upload() {
     setSessions(await api.listSessions());
   }
 
+  const [useClassifier, setUseClassifier] = useState(true);
   async function startDetection() {
     if (!sessionId) return;
-    await api.detect(sessionId);
-    alert("Detecção de menções iniciada em background.");
+    const r = await api.detect(sessionId, useClassifier);
+    alert(
+      `Detecção iniciada em background. Classifier: ${r.classifier ? "ativo" : "desligado"}.`
+    );
   }
 
   return (
@@ -78,6 +81,17 @@ export function Upload() {
       </table>
 
       <div style={{ marginTop: 16 }}>
+        <label className="row" style={{ marginBottom: 8 }}>
+          <input
+            type="checkbox"
+            checked={useClassifier}
+            onChange={(e) => setUseClassifier(e.target.checked)}
+            style={{ width: "auto" }}
+          />
+          <span className="muted">
+            Filtrar candidatos via Claude (recomendado — exige leis cadastradas)
+          </span>
+        </label>
         <button onClick={startDetection} disabled={!sessionId} className="primary">
           Iniciar detecção de menções
         </button>

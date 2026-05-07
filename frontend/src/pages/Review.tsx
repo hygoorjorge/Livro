@@ -73,6 +73,16 @@ export function Review() {
         <h2 style={{ margin: 0 }}>Revisão lado-a-lado</h2>
         <div className="row">
           <button onClick={refreshMentions}>↻ Atualizar</button>
+          <button
+            onClick={async () => {
+              await api.batchGenerate(sessionId);
+              alert(
+                "Geração em lote iniciada — acompanhe na barra de progresso. Atualize a tela para ver as propostas conforme aparecem."
+              );
+            }}
+          >
+            ⚡ Gerar todas as propostas pendentes
+          </button>
           <a href="/historical">Fila histórica →</a>
         </div>
       </div>

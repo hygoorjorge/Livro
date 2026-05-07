@@ -59,6 +59,12 @@ export function Verify() {
         <a href={`/api/pdf/${sessionId}/export.docx`} target="_blank">
           Baixar DOCX
         </a>
+        <a href={`/api/verify/${sessionId}/audit.md`} target="_blank">
+          Baixar auditoria (Markdown)
+        </a>
+        <a href={`/api/verify/${sessionId}/audit.json`} target="_blank">
+          Auditoria (JSON)
+        </a>
       </div>
       {err && (
         <pre style={{ background: "#fee2e2", padding: 12, borderRadius: 6 }}>{err}</pre>

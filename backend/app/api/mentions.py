@@ -1,8 +1,12 @@
+from dataclasses import dataclass
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+from app.core.logging import get_logger
 from app.db.models import (
     ChangeLog,
     Mention,
@@ -14,8 +18,12 @@ from app.db.models import (
     TextSpan,
 )
 from app.db.session import SessionLocal, get_session_dep
-from app.services.mention_detector import find_candidates
+from app.services.claude_client import ClaudeClient
+from app.services.corpus import build_corpus, has_corpus
+from app.services.mention_detector import context_window, find_candidates
 from app.workers.progress import publish_progress
+
+logger = get_logger(__name__)
 
 
 router = APIRouter(prefix="/mentions", tags=["mentions"])
@@ -49,7 +57,24 @@ class StatusIn(BaseModel):
     status: str
 
 
-async def _detect(session_id: int) -> None:
+@dataclass
+class _Pending:
+    paragraph_id: int
+    char_start: int
+    char_end: int
+    raw_text: str
+    detected_ref: str
+    regex_historical: bool
+    context: str
+
+
+async def _detect(session_id: int, use_classifier: bool = True) -> None:
+    """Two-phase detection: regex collects candidates, Claude validates them.
+
+    The classifier filters false positives, normalizes references and refines
+    the historical-context flag. If no laws/mappings are configured yet, or if
+    the Anthropic key is missing, the function falls back to regex-only.
+    """
     async with SessionLocal() as db:
         session = await db.get(Session, session_id)
         if session is None:
@@ -62,38 +87,137 @@ async def _detect(session_id: int) -> None:
             await db.execute(select(Paragraph).where(Paragraph.page_id.in_(page_ids)))
         ).scalars().all()
         total = len(paragraphs)
+
         await publish_progress(session_id, "detect_start", {"total": total})
-        found = 0
+
+        pending: list[_Pending] = []
         for i, para in enumerate(paragraphs, start=1):
             if para.protected:
                 continue
             for cand in find_candidates(para.full_text):
-                db.add(
-                    Mention(
+                pending.append(
+                    _Pending(
                         paragraph_id=para.id,
                         char_start=cand.char_start,
                         char_end=cand.char_end,
                         raw_text=cand.raw_text,
                         detected_ref=cand.detected_ref,
-                        is_historical=cand.has_historical_hint_nearby,
-                        status=(
-                            MentionStatus.awaiting_user_decision.value
-                            if cand.has_historical_hint_nearby
-                            else MentionStatus.pending.value
-                        ),
+                        regex_historical=cand.has_historical_hint_nearby,
+                        context=context_window(para.full_text, cand),
                     )
                 )
-                found += 1
             if i % 25 == 0 or i == total:
                 await publish_progress(
                     session_id,
                     "detect_progress",
-                    {"done": i, "total": total, "mentions": found},
+                    {"done": i, "total": total, "mentions": len(pending)},
                 )
+
+        classifier_active = use_classifier and bool(settings.anthropic_api_key)
+        if classifier_active and pending:
+            classifier_active = await has_corpus(db)
+        if classifier_active:
+            await _classify_and_persist(db, session_id, pending)
+        else:
+            logger.info(
+                "classifier disabled (use=%s key=%s); persisting regex hits as-is",
+                use_classifier,
+                bool(settings.anthropic_api_key),
+            )
+            for p in pending:
+                db.add(
+                    Mention(
+                        paragraph_id=p.paragraph_id,
+                        char_start=p.char_start,
+                        char_end=p.char_end,
+                        raw_text=p.raw_text,
+                        detected_ref=p.detected_ref,
+                        is_historical=p.regex_historical,
+                        classifier_confidence=0.0,
+                        status=(
+                            MentionStatus.awaiting_user_decision.value
+                            if p.regex_historical
+                            else MentionStatus.pending.value
+                        ),
+                    )
+                )
+
         session.status = SessionStatus.reviewing.value
         await db.commit()
         await publish_progress(
-            session_id, "detect_done", {"total": total, "mentions": found}
+            session_id,
+            "detect_done",
+            {"total": total, "mentions": len(pending), "classified": classifier_active},
+        )
+
+
+async def _classify_and_persist(
+    db: AsyncSession, session_id: int, pending: list[_Pending]
+) -> None:
+    """Send pending regex hits through Claude in batches and persist results."""
+    corpus = await build_corpus(db)
+    claude = ClaudeClient()
+    batch_size = settings.classifier_batch_size
+    total_batches = (len(pending) + batch_size - 1) // batch_size
+
+    kept = dropped = 0
+    for batch_idx in range(total_batches):
+        batch = pending[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+        candidates = [
+            {
+                "candidate_id": idx,
+                "raw_text": p.raw_text,
+                "detected_ref": p.detected_ref,
+                "regex_historical": p.regex_historical,
+                "context": p.context,
+            }
+            for idx, p in enumerate(batch)
+        ]
+        try:
+            results = await claude.classify_candidates(
+                law_corpus_block=corpus, candidates=candidates
+            )
+        except Exception as exc:
+            logger.warning("classifier failed on batch %d: %s — falling back to regex", batch_idx, exc)
+            results = []
+
+        result_by_id = {r.candidate_id: r for r in results}
+        for local_idx, p in enumerate(batch):
+            r = result_by_id.get(local_idx)
+            if r is not None and not r.is_mention:
+                dropped += 1
+                continue
+            historical = (
+                r.is_historical if r is not None else p.regex_historical
+            )
+            ref = (r.normalized_ref if r and r.normalized_ref else p.detected_ref)
+            db.add(
+                Mention(
+                    paragraph_id=p.paragraph_id,
+                    char_start=p.char_start,
+                    char_end=p.char_end,
+                    raw_text=p.raw_text,
+                    detected_ref=ref,
+                    is_historical=historical,
+                    classifier_confidence=r.confidence if r else 0.0,
+                    classifier_rationale=r.rationale if r else None,
+                    status=(
+                        MentionStatus.awaiting_user_decision.value
+                        if historical
+                        else MentionStatus.pending.value
+                    ),
+                )
+            )
+            kept += 1
+        await publish_progress(
+            session_id,
+            "classify_progress",
+            {
+                "batch": batch_idx + 1,
+                "total_batches": total_batches,
+                "kept": kept,
+                "dropped": dropped,
+            },
         )
 
 
@@ -101,13 +225,14 @@ async def _detect(session_id: int) -> None:
 async def detect(
     session_id: int,
     background: BackgroundTasks,
+    use_classifier: bool = True,
     db: AsyncSession = Depends(get_session_dep),
 ):
     session = await db.get(Session, session_id)
     if session is None:
         raise HTTPException(404, "session not found")
-    background.add_task(_detect, session_id)
-    return {"queued": True}
+    background.add_task(_detect, session_id, use_classifier)
+    return {"queued": True, "classifier": use_classifier}
 
 
 @router.get("/{session_id}", response_model=list[MentionOut])

@@ -1,12 +1,29 @@
-from fastapi import APIRouter, Depends, HTTPException
+import asyncio
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Mention, Page, Paragraph, Proposal, ProposalStatus
-from app.db.session import get_session_dep
+from app.core.logging import get_logger
+from app.db.models import (
+    Mention,
+    MentionStatus,
+    Page,
+    Paragraph,
+    Proposal,
+    ProposalStatus,
+)
+from app.db.session import SessionLocal, get_session_dep
 from app.services.claude_client import ClaudeClient
-from app.services.proposal_engine import accept_proposal, generate_proposal, reject_proposal
+from app.services.proposal_engine import (
+    accept_proposal,
+    generate_proposal,
+    reject_proposal,
+)
+from app.workers.progress import publish_progress
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/proposals", tags=["proposals"])
 
@@ -90,3 +107,76 @@ async def list_for_mention(
         await db.execute(select(Proposal).where(Proposal.mention_id == mention_id))
     ).scalars().all()
     return rows
+
+
+async def _generate_batch(session_id: int) -> None:
+    claude = ClaudeClient()
+    async with SessionLocal() as db:
+        pages = (
+            await db.execute(select(Page).where(Page.session_id == session_id))
+        ).scalars().all()
+        page_ids = [p.id for p in pages]
+        paragraphs = (
+            await db.execute(
+                select(Paragraph).where(Paragraph.page_id.in_(page_ids))
+            )
+        ).scalars().all()
+        para_ids = [p.id for p in paragraphs]
+        mentions = (
+            await db.execute(
+                select(Mention)
+                .where(Mention.paragraph_id.in_(para_ids))
+                .where(Mention.status == MentionStatus.pending.value)
+            )
+        ).scalars().all()
+        existing = (
+            await db.execute(
+                select(Proposal.mention_id).where(
+                    Proposal.mention_id.in_([m.id for m in mentions])
+                )
+            )
+        ).scalars().all()
+        already = set(existing)
+        targets = [m.id for m in mentions if m.id not in already]
+
+    total = len(targets)
+    await publish_progress(
+        session_id, "batch_proposal_start", {"total": total}
+    )
+    if not total:
+        await publish_progress(session_id, "batch_proposal_done", {"total": 0})
+        return
+
+    semaphore = asyncio.Semaphore(3)
+    completed = 0
+
+    async def _one(mid: int) -> None:
+        nonlocal completed
+        async with semaphore:
+            try:
+                async with SessionLocal() as db:
+                    await generate_proposal(db, mid, claude)
+                    await db.commit()
+            except Exception as exc:
+                logger.warning("batch proposal failed for mention %d: %s", mid, exc)
+            finally:
+                completed += 1
+                await publish_progress(
+                    session_id,
+                    "batch_proposal_progress",
+                    {"done": completed, "total": total},
+                )
+
+    await asyncio.gather(*(_one(mid) for mid in targets))
+    await publish_progress(
+        session_id, "batch_proposal_done", {"total": total, "done": completed}
+    )
+
+
+@router.post("/{session_id}/batch")
+async def batch_generate(
+    session_id: int,
+    background: BackgroundTasks,
+):
+    background.add_task(_generate_batch, session_id)
+    return {"queued": True}

@@ -32,8 +32,13 @@ export const api = {
   listSessions: () =>
     request<{ id: number; name: string; status: string }[]>("/sessions"),
 
-  detect: (sid: number) =>
-    request<{ queued: boolean }>(`/mentions/${sid}/detect`, { method: "POST" }),
+  detect: (sid: number, useClassifier = true) =>
+    request<{ queued: boolean; classifier: boolean }>(
+      `/mentions/${sid}/detect?use_classifier=${useClassifier}`,
+      { method: "POST" }
+    ),
+  batchGenerate: (sid: number) =>
+    request<{ queued: boolean }>(`/proposals/${sid}/batch`, { method: "POST" }),
   listMentions: (sid: number, status?: string) =>
     request<any[]>(`/mentions/${sid}${status ? `?status=${status}` : ""}`),
   listHighlights: (sid: number) =>
